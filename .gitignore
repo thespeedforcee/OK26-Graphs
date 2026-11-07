@@ -1,0 +1,8 @@
+# Ignoruj folder/plik nauty
+nauty2_8_9/
+
+# Ignoruj pliki wykonywalne (wynik kompilacji gcc)
+*.exe
+
+# Ignoruj wygenerowane pliki z wynikami
+*.json

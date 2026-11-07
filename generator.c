@@ -53,7 +53,7 @@ static void generate(Rng *r, int n, int k, int adj[MAXN][MAXN]){
     }
     //losowanie bez zwracania k-(n-1) par 
     for (int i=0; i<k-(n-1); i++){
-        int j=i+rng_int(r, m-1);
+        int j=i+rng_int(r, m-i);
         int a=miss[j][0];
         int b=miss[j][1];
         miss[j][0]=miss[i][0];
