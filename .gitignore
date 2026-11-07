@@ -6,3 +6,6 @@ nauty2_8_9/
 
 # Ignoruj wygenerowane pliki z wynikami
 *.json
+
+nauty*
+*.tar.gz
