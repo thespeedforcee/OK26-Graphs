@@ -15,7 +15,7 @@
 #define MAXN_EXACT 25 //do tego dokl liczy
 #define MAX_PAIRS (MAXN*(MAXN-1)/2)
 #define G6_BUF 330 //bufor na grapf6
-#define COST_INF 1e-300 //koszt grafu niespojnego
+#define COST_INF 1e300 //koszt grafu niespojnego
 #define COST_EPS 1e-12 //dokładność obliczeń zmiennoprzecinkowych
 
 typedef __int128 i128;
@@ -41,7 +41,7 @@ static inline uint64_t rng_next(Rng *r) {
     z=(z^(z>>27))*0x94D049BB133111EBULL;
     return z^(z>>31);
 }
-//liczba z zakr. [0,m)]
+//liczba z zakr. [0,m]
 static inline int rng_int(Rng *r, int m){
     return (int)(rng_next(r)%(uint64_t)m);
 }
@@ -92,7 +92,7 @@ static int is_connected(int n, adj adj){
     int stack[MAXN];
     int top=0;
     int height=0;
-    int cnt=0;
+    int cnt=1;
     visited[0]=1;
     stack[top++]=0;
     while (height<top){
@@ -124,7 +124,7 @@ static inline int g6_decode(const char *g6, adj adj){
             return -1;
         }
     }
-    memset(adj,0,sizeof(adj));
+    memset(adj,0,sizeof(int)*MAXN*MAXN);
     int pos=1;
     int bit=5;
     for (int j=1; j<n; j++){
@@ -164,7 +164,7 @@ static inline void g6_encode(int n, adj adj, char *buf){
 
 //generator: losowy graf spojny G(n,k), losowe drzewo, losowanie bez zwracania
 static inline void generate_connected(Rng *r, int n, int k, adj adj){
-    memset(adj, 0, sizeof(adj));
+    memset(adj, 0, sizeof(int)*MAXN*MAXN);
     int perm[MAXN];
     for (int i=0; i<n; i++){
         perm[i]=i;
@@ -258,10 +258,10 @@ static inline double integrality_cost(int n, const double *lam){
 static inline double graph_cost(int n, adj adj){
     if (!is_connected(n,adj)){
         return COST_INF;
-        double lam[MAXN];
-        jacobi(n,adj,lam);
-        return integrality_cost(n,lam);
     }
+    double lam[MAXN];
+    jacobi(n,adj,lam);
+    return integrality_cost(n,lam);
 }
 
 //obl calkowitoliczbowwe (dokladne)
