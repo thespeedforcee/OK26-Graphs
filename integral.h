@@ -1,3 +1,21 @@
+/**
+ * @file integral.h
+ * @brief Wspolna biblioteka: generowanie grafow, kodowanie graph6, dokladne sito
+ *        grafow calkowitych (arytmetyka calkowita), przeszukiwanie lokalne.
+ *
+ * Graf jest calkowity (integralny), gdy wszystkie wartosci wlasne jego macierzy
+ * sasiedztwa sa liczbami calkowitymi.
+ *
+ * SITO (zastepuje dawna metode Jacobiego):
+ *  1. wielomian charakterystyczny det(xI - A) liczony DOKLADNIE (Faddeev-Leverrier,
+ *     __int128, bez zaokraglen),
+ *  2. z wielomianu wyrzucane sa pierwiastki calkowite z [-Delta, Delta]
+ *     (|lambda| <= max stopien) dzieleniem Hornera, z krotnosciami.
+ *  Koszt grafu = n - (liczba pierwiastkow calkowitych). Koszt 0 <=> graf calkowity.
+ *
+ * Ograniczenie: n <= MAXN_EXACT (zakres bezpieczny dla __int128).
+ *
+ */
 #ifndef INTEGRAL_H
 #define INTEGRAL_H
 #ifndef _POSIX_C_SOURCE
@@ -11,450 +29,358 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAXN 62 //max rzad grafu
-#define MAXN_EXACT 25 //do tego dokl liczy
-#define MAX_PAIRS (MAXN*(MAXN-1)/2)
-#define G6_BUF 330 //bufor na grapf6
-#define COST_INF 1e300 //koszt grafu niespojnego
-#define COST_EPS 1e-12 //dokładność obliczeń zmiennoprzecinkowych
+#define MAXN 62               /**< maks. rzad grafu w formacie graph6 (wersja 1-bajtowa) */
+#define MAXN_EXACT 25         /**< maks. rzad, dla ktorego sito jest uruchamiane */
+#define MAX_PAIRS (MAXN*(MAXN-1)/2) /**< maks. liczba par wierzcholkow */
+#define G6_BUF 330            /**< rozmiar bufora na lancuch graph6 */
+#define COST_INF 1e300        /**< koszt grafu niespojnego */
+#define COST_EPS 1e-12        /**< minimalna poprawa kosztu uznawana za zysk */
+#define COST_ZERO 0.5         /**< koszt ponizej tej wartosci = graf calkowity (koszt jest calkowity) */
 
-typedef __int128 i128;
-typedef int adj[MAXN][MAXN]; //macierz sasiedztwa
-typedef struct{ 
-    int u,v;
+typedef __int128 i128;        /**< 128-bitowa liczba calkowita (GCC) */
+typedef int adj[MAXN][MAXN];  /**< macierz sasiedztwa */
+
+/** Para wierzcholkow (krawedz lub nie-krawedz). */
+typedef struct {
+    int u, v;
 } Pair;
 
-//czas w sek, monotoniczny
+/** @brief Czas monotoniczny w sekundach. */
 static inline double now_s(void){
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec+1e-9*(double)ts.tv_nsec;
+    return (double)ts.tv_sec + 1e-9*(double)ts.tv_nsec;
 }
-//stan generatora liczb pseudolosowych
-typedef struct{
+
+/** Stan generatora pseudolosowego (splitmix64), przekazywany jawnie. */
+typedef struct {
     uint64_t s;
 } Rng;
-//zwraca nastepna liczbe pseudolosowa
-static inline uint64_t rng_next(Rng *r) {
-    uint64_t z=(r->s+=0x9E3779B97F4A7C15ULL);
-    z=(z^(z>>30))*0xBF58476D1CE4E5B9ULL;
-    z=(z^(z>>27))*0x94D049BB133111EBULL;
+
+/** @brief Nastepna liczba pseudolosowa 64-bitowa. */
+static inline uint64_t rng_next(Rng *r){
+    uint64_t z = (r->s += 0x9E3779B97F4A7C15ULL);
+    z = (z^(z>>30))*0xBF58476D1CE4E5B9ULL;
+    z = (z^(z>>27))*0x94D049BB133111EBULL;
     return z^(z>>31);
 }
-//liczba z zakr. [0,m]
+
+/** @brief Liczba losowa z zakresu [0, m). */
 static inline int rng_int(Rng *r, int m){
-    return (int)(rng_next(r)%(uint64_t)m);
+    return (int)(rng_next(r) % (uint64_t)m);
 }
-//ziarno, jesli na minusie to bierze z zegar
+
+/** @brief Ziarno: wartosc ujemna oznacza ziarno z zegara (ustalane RAZ w main). */
 static inline long long resolve_seed(long long seed){
-    if (seed<0){
-        seed=(long long)time(NULL);
-    }
+    if (seed < 0) seed = (long long)time(NULL);
     return seed;
 }
-//losowa permutacja tab par
+
+/** @brief Losowa permutacja tablicy par (Fisher-Yates). */
 static inline void shuffle_pairs(Rng *r, Pair *pairs, int num_pairs){
-    for (int i=num_pairs-1; i>0; i--){
-        int j=rng_int(r, i+1);
-        Pair t=pairs[i];
-        pairs[i]=pairs[j];
-        pairs[j]=t;
+    for (int i = num_pairs-1; i > 0; i--){
+        int j = rng_int(r, i+1);
+        Pair t = pairs[i]; pairs[i] = pairs[j]; pairs[j] = t;
     }
 }
-//lb krawedzi
+
+/** @brief Liczba krawedzi grafu. */
 static inline int count_edges(int n, const adj a){
-    int k=0;
-    for (int i=0; i<n; i++){
-        for (int j=i+1; j<n; j++){
-            k+=a[i][j];
-        }
-    }
+    int k = 0;
+    for (int i = 0; i < n; i++) for (int j = i+1; j < n; j++) k += a[i][j];
     return k;
 }
-//max st. wierzcholka
+
+/** @brief Maksymalny stopien wierzcholka. */
 static inline int max_degree(int n, const adj a){
-    int maxd=0;
-    for (int i=0; i<n; i++){
-        int d=0;
-        for (int j=0; j<n; j++){
-            d+=a[i][j];
-        }
-        if (d>maxd){
-            maxd=d;
-        }
+    int maxd = 0;
+    for (int i = 0; i < n; i++){
+        int d = 0;
+        for (int j = 0; j < n; j++) d += a[i][j];
+        if (d > maxd) maxd = d;
     }
     return maxd;
 }
 
-//test spojnosci bfs
+/** @brief Test spojnosci (przeszukiwanie wszerz). @return 1 gdy graf spojny. */
 static int is_connected(int n, adj adj){
-    int visited[MAXN]={0};
-    int stack[MAXN];
-    int top=0;
-    int height=0;
-    int cnt=1;
-    visited[0]=1;
-    stack[top++]=0;
-    while (height<top){
-        int u=stack[height++];
-        for (int v=0; v<n; v++){
-            if (adj[u][v] && !visited[v]){
-                visited[v]=1;
-                stack[top++]=v;
-                cnt++;
-            }
+    int visited[MAXN] = {0}, queue[MAXN];
+    int head = 0, tail = 0, cnt = 1;
+    visited[0] = 1; queue[tail++] = 0;
+    while (head < tail){
+        int u = queue[head++];
+        for (int v = 0; v < n; v++){
+            if (adj[u][v] && !visited[v]){ visited[v] = 1; queue[tail++] = v; cnt++; }
         }
     }
-    return cnt==n;
+    return cnt == n;
 }
 
-//grapf6 -> macierz sasiedztwa
+/**
+ * @brief Dekoduje graph6 do macierzy sasiedztwa.
+ * @return rzad grafu n, lub -1 gdy lancuch jest niepoprawny.
+ */
 static inline int g6_decode(const char *g6, adj adj){
-    int n=(unsigned char)g6[0]-63;
-    if (n<1 || n>MAXN){
-        return -1;
+    int n = (unsigned char)g6[0] - 63;
+    if (n < 1 || n > MAXN) return -1;
+    int need = (n*(n-1)/2 + 5)/6;
+    if ((int)strlen(g6) < 1+need) return -1;
+    for (int i = 1; i <= need; i++){
+        unsigned char c = (unsigned char)g6[i];
+        if (c < 63 || c > 126) return -1;
     }
-    int need=(n*(n-1)/2+5)/6;
-    if ((int)strlen(g6)<1+need){
-        return -1;
-    }
-    for (int i=1; i<=need; i++){
-        unsigned char c=(unsigned char)g6[i];
-        if (c<63 || c>126){
-            return -1;
-        }
-    }
-    memset(adj,0,sizeof(int)*MAXN*MAXN);
-    int pos=1;
-    int bit=5;
-    for (int j=1; j<n; j++){
-        for (int i=0; i<j; i++){
-            int v=((unsigned char)g6[pos]-63)>>bit&1;
-            adj[i][j]=adj[j][i]=v;
-            if (--bit<0){
-                bit=5;
-                pos++;
-            }
+    memset(adj, 0, sizeof(int)*MAXN*MAXN);
+    int pos = 1, bit = 5;
+    for (int j = 1; j < n; j++){
+        for (int i = 0; i < j; i++){
+            int v = (((unsigned char)g6[pos]-63) >> bit) & 1;
+            adj[i][j] = adj[j][i] = v;
+            if (--bit < 0){ bit = 5; pos++; }
         }
     }
     return n;
 }
 
-//koduje graf do grpaf6
+/** @brief Koduje graf do graph6 (bufor min. G6_BUF znakow). */
 static inline void g6_encode(int n, adj adj, char *buf){
-    int pos=0;
-    int bits=0;
-    int val=0;
-    buf[pos++]=(char)(n+63);
-    for (int j=1; j<n; j++){
-        for (int i=0; i<j; i++){
-            val=(val<<1)|adj[i][j];
-            if (++bits==6){
-                buf[pos++]=(char)(val+63);
-                val=0;
-                bits=0;
-            }
+    int pos = 0, bits = 0, val = 0;
+    buf[pos++] = (char)(n+63);
+    for (int j = 1; j < n; j++){
+        for (int i = 0; i < j; i++){
+            val = (val<<1) | adj[i][j];
+            if (++bits == 6){ buf[pos++] = (char)(val+63); val = 0; bits = 0; }
         }
     }
-    if (bits>0){
-        buf[pos++]=(char)((val<<(6-bits))+63);
-    }
-    buf[pos]='\0';
+    if (bits > 0) buf[pos++] = (char)((val << (6-bits)) + 63);
+    buf[pos] = '\0';
 }
 
-//generator: losowy graf spojny G(n,k), losowe drzewo, losowanie bez zwracania
+/**
+ * @brief Kopiuje lancuch do bufora z ucieczka znakow \ i " (graph6 moze je zawierac).
+ *        Wymagane do poprawnego JSON. Bufor out: min. 2*strlen(s)+1.
+ */
+static inline void json_escape(const char *s, char *out){
+    for (; *s; s++){ if (*s == '\\' || *s == '"') *out++ = '\\'; *out++ = *s; }
+    *out = '\0';
+}
+
+/**
+ * @brief Generator: losowy spojny graf G(n,k). Losowe drzewo + losowanie bez zwracania
+ *        brakujacych krawedzi. Zlozonosc O(n^2).
+ */
 static inline void generate_connected(Rng *r, int n, int k, adj adj){
     memset(adj, 0, sizeof(int)*MAXN*MAXN);
     int perm[MAXN];
-    for (int i=0; i<n; i++){
-        perm[i]=i;
+    for (int i = 0; i < n; i++) perm[i] = i;
+    for (int i = n-1; i > 0; i--){
+        int j = rng_int(r, i+1);
+        int t = perm[i]; perm[i] = perm[j]; perm[j] = t;
     }
-    for (int i=n-1; i>0; i--){
-        int j=rng_int(r, i+1);
-        int t=perm[i];
-        perm[i]=perm[j];
-        perm[j]=t;
+    for (int i = 1; i < n; i++){
+        int p = perm[rng_int(r, i)];
+        adj[p][perm[i]] = adj[perm[i]][p] = 1;
     }
-    for (int i=1; i<n; i++){
-        int p=perm[rng_int(r,i)];
-        adj[p][perm[i]]=adj[perm[i]][p]=1;
-    }
-    Pair miss[MAX_PAIRS];
-    int m=0;
-    for (int u=0; u<n; u++){
-        for (int v=u+1; v<n; v++){
-            if (!adj[u][v]){
-                miss[m++]=(Pair){u,v};
-            }
-        }
-    }
-    for (int i=0; i<k-(n-1); i++){
-        int j=i+rng_int(r,m-i);
-        Pair e =miss[j];
-        miss[j]=miss[i];
-        adj[e.u][e.v]=adj[e.v][e.u]=1;
+    static Pair miss[MAX_PAIRS];
+    int m = 0;
+    for (int u = 0; u < n; u++) for (int v = u+1; v < n; v++) if (!adj[u][v]) miss[m++] = (Pair){u, v};
+    for (int i = 0; i < k-(n-1); i++){
+        int j = i + rng_int(r, m-i);
+        Pair e = miss[j]; miss[j] = miss[i];
+        adj[e.u][e.v] = adj[e.v][e.u] = 1;
     }
 }
 
-//obl zmiennoprzecinkowe, wart wlasne macierzy sasiedztwa cykliczna metoda jacobiego
-static inline int jacobi(int n, adj adj, double *lam){
-    double a[MAXN][MAXN];
-    for (int i=0; i<n; i++){
-        for (int j=0; j<n; j++){
-            a[i][j]=adj[i][j];
-        }
-    }
-    int sweep;
-    for (sweep=0; sweep<60; sweep++){
-        double off=0.0;
-        for (int p=0; p<n; p++){
-            for (int q=p+1; q<n; q++){
-                off+=a[p][q]*a[p][q];
-            }
-        }
-        if (off<1e-24){
-            break;
-        }
-        for (int p=0; p<n-1; p++){
-            for (int q=p+1; q<n; q++){
-                if (fabs(a[p][q])<1e-300){
-                    continue;
-                }
-                double theta=(a[q][q]-a[p][p])/(2.0*a[p][q]);
-                double t=(theta>=0?1.0:-1.0)/(fabs(theta)+sqrt(theta*theta+1.0));
-                double c=1.0/sqrt(t*t+1.0);
-                double s=t*c;
-                for (int k=0; k<n; k++){ //kolumny
-                    double akp=a[k][p];
-                    double akq=a[k][q];
-                    a[k][p]=c*akp-s*akq;
-                    a[k][q]=s*akp+c*akq;
-                }
-                for (int k=0; k<n; k++){ //wiersze
-                    double apk=a[p][k];
-                    double aqk=a[q][k];
-                    a[p][k]=c*apk-s*aqk;
-                    a[q][k]=s*apk+c*aqk;
-                }
-            }
-        }
-    } 
-    for (int i=0; i<n; i++){
-        lam[i]=a[i][i];
-    }
-    return sweep;      
-}
+/*  SITO (arytmetyka calkowita)  */
 
-//koszt calkowitosci
-static inline double integrality_cost(int n, const double *lam){
-    double c=0.0;
-    for (int i=0; i<n; i++){
-        c+=fabs(lam[i]-round(lam[i]));
-    }
-    return c;
-}
-
-//funkcja celu minimalizowana przez heurystyki
-static inline double graph_cost(int n, adj adj){
-    if (!is_connected(n,adj)){
-        return COST_INF;
-    }
-    double lam[MAXN];
-    jacobi(n,adj,lam);
-    return integrality_cost(n,lam);
-}
-
-//obl calkowitoliczbowwe (dokladne)
-//wspolczynniki wielomianu charakterystycznego
+/**
+ * @brief Wspolczynniki wielomianu charakterystycznego det(xI - A) (Faddeev-Leverrier).
+ *        c[i] to wspolczynnik przy x^i, c[n] = 1. Dzielenie przez k jest dokladne.
+ *        Zlozonosc O(n^4).
+ * @param n rzad grafu (n <= MAXN_EXACT)
+ * @param c (wyjscie) tablica n+1 wspolczynnikow
+ */
 static inline void char_poly(int n, adj adj, i128 *c){
-    i128 m[MAXN_EXACT][MAXN_EXACT], am[MAXN_EXACT][MAXN_EXACT];
-    memset(m, 0, sizeof(m));
-    c[n]=1;
-    for (int k=1; k<=n; k++){
-        for (int i=0; i<n; i++){
-            for (int j=0; j<n; j++){
-                i128 sum=0;
-                for (int l=0; l<n; l++){
-                    if (adj[i][l]){
-                        sum+=m[l][j];
-                    }
-                }
-                am[i][j]=sum;
+    int nb[MAXN_EXACT][MAXN_EXACT], deg[MAXN_EXACT];
+    i128 m[MAXN_EXACT][MAXN_EXACT], t[MAXN_EXACT][MAXN_EXACT];
+    for (int i = 0; i < n; i++){                       /* listy sasiadow: A*M kosztuje 2k*n zamiast n^3 */
+        deg[i] = 0;
+        for (int j = 0; j < n; j++) if (adj[i][j]) nb[i][deg[i]++] = j;
+    }
+    for (int i = 0; i < n; i++) for (int j = 0; j < n; j++) m[i][j] = (i == j);   /* M_1 = I */
+    c[n] = 1;
+    for (int k = 1; k <= n; k++){
+        i128 tr = 0;
+        for (int i = 0; i < n; i++){
+            for (int j = 0; j < n; j++){
+                i128 sum = 0;
+                for (int q = 0; q < deg[i]; q++) sum += m[nb[i][q]][j];
+                t[i][j] = sum;
             }
+            tr += t[i][i];
         }
-        for (int i=0; i<n; i++){
-            for (int j=0; j<n; j++){
-                m[i][j]=am[i][j]+(i==j?c[n-k+1]:0);
-            }
-        }
-        i128 tr=0;
-        for (int i=0; i<n; i++){
-            for (int l=0; l<n; l++){
-                if (adj[i][l]){
-                    tr+=m[l][i];
-                }
-            }
-        }
-        c[n-k]=-tr/k;
+        c[n-k] = -tr/k;                                /* dzielenie dokladne */
+        if (k < n)
+            for (int i = 0; i < n; i++)
+                for (int j = 0; j < n; j++) m[i][j] = t[i][j] + (i == j ? c[n-k] : 0);
     }
 }
 
-//sprawdza czy wielomain ma n pierwiastkow calk 
-//dzielenie hornera
-static inline int integer_spectrum(int n, const i128 *c, int maxdeg, int *spec){
+/**
+ * @brief SITO pierwiastkow calkowitych: dzieli wielomian przez (x - r) dla r z
+ *        [-maxdeg, maxdeg] (schemat Hornera), z uwzglednieniem krotnosci.
+ * @param spec (wyjscie) znalezione pierwiastki calkowite (rosnaco, z krotnosciami)
+ * @return liczba znalezionych pierwiastkow; wynik == n <=> graf calkowity
+ */
+static inline int integer_roots(int n, const i128 *c, int maxdeg, int *spec){
     i128 p[MAXN_EXACT+1];
-    for (int i=0; i<=n; i++){
-        p[i]=c[i];
-    }
-    int deg=n;
-    int found=0;
-    for (int r=-maxdeg; r<=maxdeg; r++){
-        while(deg>0){
-            i128 q[MAXN_EXACT+1], rem=p[deg];
-            for (int i=deg-1; i>=0; i--){
-                q[i]=rem;
-                rem=p[i]+rem*r;
-            }
-            if (rem!=0){
-                break;
-            }
-            for (int i=0; i<deg; i++){
-                p[i]=q[i];
-            }
+    for (int i = 0; i <= n; i++) p[i] = c[i];
+    int deg = n, found = 0;
+    for (int r = -maxdeg; r <= maxdeg; r++){
+        while (deg > 0){
+            i128 q[MAXN_EXACT+1], rem = p[deg];
+            for (int i = deg-1; i >= 0; i--){ q[i] = rem; rem = p[i] + rem*r; }
+            if (rem != 0) break;
+            for (int i = 0; i < deg; i++) p[i] = q[i];
             deg--;
-            spec[found++]=r;
+            spec[found++] = r;
         }
     }
-    return found==n;
+    return found;
 }
 
-//weryfikacja wyniku
+/**
+ * @brief Funkcja celu minimalizowana przez heurystyki: n - liczba calkowitych
+ *        wartosci wlasnych; COST_INF dla grafu niespojnego. Czysto calkowitoliczbowa.
+ */
+static inline double graph_cost(int n, adj adj){
+    if (!is_connected(n, adj)) return COST_INF;
+    i128 c[MAXN_EXACT+1];
+    int spec[MAXN_EXACT+1];
+    char_poly(n, adj, c);
+    return (double)(n - integer_roots(n, c, max_degree(n, adj), spec));
+}
+
+/*  Weryfikacja wyniku  */
+
+/** Wynik pelnej weryfikacji grafu. */
 typedef struct {
-    int n, k;
-    int connected;
-    int sweeps;
-    double cost;
-    int float_integral;
-    int exact_integral;
-    int integral_graph;
-    int spec[MAXN_EXACT];
+    int n, k;                /**< rzad i liczba krawedzi */
+    int connected;           /**< czy spojny */
+    int cost;                /**< n - liczba pierwiastkow calkowitych */
+    int integral_graph;      /**< spojny i calkowity */
+    int spec[MAXN_EXACT];    /**< pierwiastki calkowite (cale widmo, gdy graf calkowity) */
+    int nspec;               /**< ile pierwiastkow calkowitych znaleziono */
 } Verdict;
 
-//pelna weryfikacja jacobi(float)+wielomian charakterystyczny(dokladna)
-static inline void verify_graph(int n, adj adj, double tol, Verdict *v){
-    v->n=n;
-    v->k=count_edges(n,adj);
-    v->connected=is_connected(n,adj);
-    double lam[MAXN];
-    v->sweeps=jacobi(n,adj,lam);
-    v->cost=integrality_cost(n,lam);
-    v->float_integral=v->cost<tol;
-    v->exact_integral=-1;
-    if (n<=MAXN_EXACT){
-        i128 c[MAXN_EXACT+1];
-        int maxdeg=max_degree(n,adj);
-        char_poly(n,adj,c);
-        v->exact_integral=integer_spectrum(n,c,maxdeg,v->spec);
-    }
-    v->integral_graph=v->connected&&(v->exact_integral==1 || (v->exact_integral==-1 && v->float_integral));
+/** @brief Pelna weryfikacja grafu (n <= MAXN_EXACT). */
+static inline void verify_graph(int n, adj adj, Verdict *v){
+    i128 c[MAXN_EXACT+1];
+    v->n = n;
+    v->k = count_edges(n, adj);
+    v->connected = is_connected(n, adj);
+    char_poly(n, adj, c);
+    v->nspec = integer_roots(n, c, max_degree(n, adj), v->spec);
+    v->cost = n - v->nspec;
+    v->integral_graph = v->connected && v->cost == 0;
 }
 
-//wypisuje widmo jako tab json lub null
+/** @brief Wypisuje widmo jako tablice JSON (lub null, gdy graf nie jest calkowity). */
 static inline void print_spectrum_json(FILE *f, const Verdict *v){
-    if (v->exact_integral != 1){
-        fputs("null", f);
-        return;
-    }
+    if (v->cost != 0){ fputs("null", f); return; }
     fputc('[', f);
-    for (int i=0; i<v->n; i++){
-        fprintf(f, "%s%d", i?",":"", v->spec[i]);
-    }
-    fputc(']',f);
+    for (int i = 0; i < v->n; i++) fprintf(f, "%s%d", i ? "," : "", v->spec[i]);
+    fputc(']', f);
 }
 
-//statystyki przeszukiwania
+/*  Przeszukiwanie lokalne  */
+
+#define MAX_FOUND 1000   /**< ile znalezionych grafow pamietamy na liscie (reszta tylko liczona) */
+
+/** Statystyki i wyniki przeszukiwania. */
 typedef struct {
-    long long evals;
-    long long steps;
-    int timed_out;
+    long long evals;       /**< liczba obliczen funkcji celu = liczba "przejrzanych" grafow */
+    long long steps;       /**< liczba przyjetych ruchow */
+    long long restarts;    /**< liczba startow od losowego grafu */
+    int timed_out;         /**< czy przerwano limitem czasu */
+    int nfound;            /**< liczba roznych (jako lancuchy graph6) znalezionych grafow calkowitych */
+    double best_cost;      /**< najlepszy koszt w calym przebiegu */
+    char best_g6[G6_BUF];  /**< graf o najlepszym koszcie */
+    char found[MAX_FOUND][G6_BUF]; /**< znalezione grafy calkowite (graph6) */
 } SearchStats;
 
-//usuwa kraw rem i dodaje add
-static inline void swap_edges(adj adj, Pair rem, Pair add){
-    adj[rem.u][rem.v]=adj[rem.v][rem.u]=0;
-    adj[add.u][add.v]=adj[add.v][add.u]=1;
+/**
+ * @brief Zapisuje znaleziony graf calkowity: lista w pamieci, stderr i opcjonalnie plik
+ *        (jeden graph6 na linie, gotowe do `labelg`). Pomija identyczne lancuchy graph6.
+ * @return 1 gdy graf jest nowy, 0 gdy juz byl
+ */
+static inline int record_found(SearchStats *st, int n, adj a, FILE *out){
+    char g6[G6_BUF];
+    g6_encode(n, a, g6);
+    int lim = st->nfound < MAX_FOUND ? st->nfound : MAX_FOUND;
+    for (int i = 0; i < lim; i++) if (strcmp(st->found[i], g6) == 0) return 0;
+    if (st->nfound < MAX_FOUND) strcpy(st->found[st->nfound], g6);
+    st->nfound++;
+    fprintf(stderr, "ZNALEZIONO #%d: %s\n", st->nfound, g6);
+    if (out){ fprintf(out, "%s\n", g6); fflush(out); }
+    return 1;
 }
 
-static inline double local_search(int n, adj adj, Rng *rng, double deadline, double tol, SearchStats *st){
-    Pair edges[MAX_PAIRS];
-    Pair non_edges[MAX_PAIRS];
-    double cur=graph_cost(n,adj);
+/** @brief Ruch: usuwa krawedz rem i dodaje krawedz add. */
+static inline void swap_edges(adj adj, Pair rem, Pair add){
+    adj[rem.u][rem.v] = adj[rem.v][rem.u] = 0;
+    adj[add.u][add.v] = adj[add.v][add.u] = 1;
+}
+
+/**
+ * @brief Wspinaczka: sasiedztwo = zamiana jednej krawedzi na nie-krawedz.
+ * @param rng  NULL => wersja deterministyczna AKZ (najlepszy ruch z calego sasiedztwa);
+ *             niezerowy => AKU (losowa kolejnosc, pierwszy ruch poprawiajacy)
+ * @param deadline czas (now_s) po ktorym przerywa
+ * @return koszt koncowy; graf zostaje w adj
+ */
+static inline double local_search(int n, adj adj, Rng *rng, double deadline, SearchStats *st){
+    static Pair edges[MAX_PAIRS], non_edges[MAX_PAIRS];
+    double cur = graph_cost(n, adj);
     st->evals++;
-    while (cur>=tol){
-        int ne=0;
-        int nn=0;
-        for (int i=0; i<n; i++){
-            for (int j=i+1; j<n; j++){
-                if (adj[i][j]){
-                    edges[ne++]= (Pair){i,j};
-                } else {
-                    non_edges[nn++]=(Pair){i,j};
-                }
-            }
+    while (cur >= COST_ZERO){
+        int ne = 0, nn = 0;
+        for (int i = 0; i < n; i++) for (int j = i+1; j < n; j++){
+            if (adj[i][j]) edges[ne++] = (Pair){i, j}; else non_edges[nn++] = (Pair){i, j};
         }
-        if (rng){
-            shuffle_pairs(rng, edges, ne);
-            shuffle_pairs(rng, non_edges,nn);
-        }
-        double best=cur;
-        int bi=-1;
-        int bj=-1;
-        int improved=0;
-        int timeout=0;
-        for (int a=0; a<ne && !improved && !timeout; a++){
-            for (int b=0; b<nn; b++){
-                if (now_s()>=deadline){
-                    timeout=1;
-                    break;
-                }
+        if (rng){ shuffle_pairs(rng, edges, ne); shuffle_pairs(rng, non_edges, nn); }
+        double best = cur;
+        int bi = -1, bj = -1, improved = 0, timeout = 0;
+        for (int a = 0; a < ne && !improved && !timeout; a++){
+            for (int b = 0; b < nn; b++){
+                if (now_s() >= deadline){ timeout = 1; break; }
                 swap_edges(adj, edges[a], non_edges[b]);
-                double c=graph_cost(n,adj);
+                double c = graph_cost(n, adj);
                 st->evals++;
-                if (c<best-COST_EPS){
-                    best=c;
-                    bi=a;
-                    bj=b;
-                    if (rng){
-                        improved=1;
-                        break;
-                    }
+                if (c < best - COST_EPS){
+                    best = c; bi = a; bj = b;
+                    if (rng){ improved = 1; break; }   /* zostawiamy ruch */
                 }
-                swap_edges(adj, non_edges[b], edges[a]);
+                swap_edges(adj, non_edges[b], edges[a]);   /* cofniecie */
             }
         }
         if (rng){
-            if (improved){
-                cur=best;
-                st->steps++;
-            }
-        } else if (bi>=0){
+            if (improved){ cur = best; st->steps++; }
+        } else if (bi >= 0){
             swap_edges(adj, edges[bi], non_edges[bj]);
-            cur=best;
-            improved=1;
-            st->steps++;
+            cur = best; improved = 1; st->steps++;
         }
-        if (timeout){
-            st->timed_out=1;
-            break;
-        }
-        if (!improved){
-            break;
-        }
+        if (timeout){ st->timed_out = 1; break; }
+        if (!improved) break;
     }
     return cur;
 }
 
-static inline void print_solution_json(const char *alg, int n, int k, long long seed, int restarts, const SearchStats *st, double cost, double time_s, const char *g6, const Verdict *v) {
+/** @brief Wypisuje wynik dzialania algorytmu jako JSON na stdout. */
+static inline void print_solution_json(const char *alg, int n, int k, long long seed, int restarts,
+                                       const SearchStats *st, double cost, double time_s,
+                                       const char *g6, const Verdict *v){
+    char esc[2*G6_BUF];
+    json_escape(g6, esc);
     printf("{\n");
     printf("  \"algorithm\": \"%s\",\n", alg);
     printf("  \"n\": %d,\n  \"k\": %d,\n  \"seed\": %lld,\n", n, k, seed);
@@ -462,14 +388,19 @@ static inline void print_solution_json(const char *alg, int n, int k, long long 
     printf("  \"evaluations\": %lld,\n  \"steps\": %lld,\n", st->evals, st->steps);
     printf("  \"timed_out\": %d,\n", st->timed_out);
     printf("  \"time_s\": %.3f,\n", time_s);
-    printf("  \"cost\": %.6e,\n", cost);
-    printf("  \"graph6\": \"%s\",\n", g6);
+    printf("  \"cost\": %.0f,\n", cost);
+    printf("  \"found_count\": %d,\n  \"found\": [", st->nfound);
+    for (int i = 0; i < st->nfound && i < MAX_FOUND; i++){
+        char e2[2*G6_BUF]; json_escape(st->found[i], e2);
+        printf("%s\"%s\"", i ? "," : "", e2);
+    }
+    printf("],\n");
+    printf("  \"graph6\": \"%s\",\n", esc);
     printf("  \"connected\": %d,\n", v->connected);
-    printf("  \"exact_integral\": %d,\n", v->exact_integral);
     printf("  \"integral_graph\": %d,\n", v->integral_graph);
     printf("  \"spectrum\": ");
     print_spectrum_json(stdout, v);
     printf("\n}\n");
 }
- 
+
 #endif
